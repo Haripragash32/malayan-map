@@ -72,6 +72,27 @@
   }
   .rep { font-size: 28px; line-height: 1; cursor: pointer; }
   .maplibregl-ctrl-bottom-right { bottom: 70px !important; }
+  #startBtn {
+    display: block; width: 100%; margin: 8px 0; padding: 12px; font-size: 16px;
+    border: 0; border-radius: 10px; background: #1a73e8; color: #fff;
+  }
+  #navbar {
+    position: absolute; top: 12px; left: 12px; right: 12px; z-index: 8; display: none;
+    background: #1a73e8; color: #fff; border-radius: 12px; padding: 12px 14px;
+    box-shadow: 0 2px 12px rgba(0,0,0,.35);
+  }
+  #navMain { display: block; font-size: 19px; line-height: 1.25; }
+  #navSub { display: block; margin-top: 4px; font-size: 14px; opacity: .92; }
+  #navBtns { display: flex; gap: 8px; margin-top: 10px; }
+  #navBtns button {
+    flex: 1; padding: 9px 6px; font-size: 14px; border: 0; border-radius: 8px;
+    background: rgba(255,255,255,.2); color: #fff;
+  }
+  body.navigating #toggle, body.navigating #toast, body.navigating #panel { display: none !important; }
+  .me {
+    width: 18px; height: 18px; border-radius: 50%; background: #1a73e8;
+    border: 3px solid #fff; box-shadow: 0 0 0 3px rgba(26,115,232,.35), 0 2px 6px rgba(0,0,0,.4);
+  }
 </style>
 </head>
 <body>
@@ -92,6 +113,14 @@
   <button id="go" type="button">Get route</button>
 </div>
 <div id="info"></div>
+<div id="navbar">
+  <b id="navMain">Starting...</b>
+  <small id="navSub"></small>
+  <div id="navBtns">
+    <button id="navVoice" type="button">🔊 Voice on</button>
+    <button id="navStop" type="button">✕ Stop</button>
+  </div>
+</div>
 <div id="bar">
   <button data-type="accident">🚗 Accident</button>
   <button data-type="police">👮 Police</button>
@@ -335,7 +364,7 @@
     const mins = Math.round(s / 60);
     return mins < 60 ? mins + ' min' : Math.floor(mins / 60) + ' h ' + (mins % 60) + ' min';
   }
-  function stepText(st) {
+  function instr(st) {
     const m = st.maneuver;
     const road = st.name ? ' onto ' + st.name : '';
     let verb;
@@ -344,7 +373,10 @@
     else if (m.type === 'roundabout' || m.type === 'rotary') verb = 'Take the roundabout';
     else if (m.modifier === 'straight') verb = 'Continue straight';
     else verb = 'Turn ' + (m.modifier || 'ahead');
-    return verb + road + ' (' + fmtDist(st.distance) + ')';
+    return verb + road;
+  }
+  function stepText(st) {
+    return st.maneuver.type === 'arrive' ? instr(st) : instr(st) + ' (' + fmtDist(st.distance) + ')';
   }
 
   async function ensurePicked(key) {
@@ -356,6 +388,47 @@
     pick(key, toPlace(results[0]));
   }
 
+  async function fetchRoute(a, b) {
+    const url = 'https://router.project-osrm.org/route/v1/driving/'
+      + a[0] + ',' + a[1] + ';' + b[0] + ',' + b[1]
+      + '?overview=full&geometries=geojson&steps=true';
+    const res = await fetch(url);
+    const data = await res.json();
+    if (data.code !== 'Ok') throw new Error('No driving route found.');
+    return data.routes[0];
+  }
+
+  let currentRoute = null;
+  let destLngLat = null;
+
+  function drawRoute(route, fit) {
+    currentRoute = route;
+    map.getSource('route').setData({ type: 'Feature', geometry: route.geometry });
+    if (fit) {
+      const bounds = new maplibregl.LngLatBounds();
+      route.geometry.coordinates.forEach(c => bounds.extend(c));
+      map.fitBounds(bounds, { padding: { top: 80, bottom: 220, left: 40, right: 40 } });
+    }
+  }
+
+  function renderInfo(route) {
+    info.innerHTML = '';
+    const head = document.createElement('b');
+    head.textContent = fmtTime(route.duration) + ' (' + fmtDist(route.distance) + ')';
+    const start = document.createElement('button');
+    start.id = 'startBtn';
+    start.type = 'button';
+    start.textContent = '▶ Start navigation';
+    start.addEventListener('click', startNav);
+    const ol = document.createElement('ol');
+    route.legs[0].steps.forEach(s => {
+      const li = document.createElement('li');
+      li.textContent = stepText(s);
+      ol.appendChild(li);
+    });
+    info.append(head, start, ol);
+  }
+
   document.getElementById('go').addEventListener('click', async () => {
     info.style.display = 'block';
     info.textContent = 'Finding route...';
@@ -364,25 +437,164 @@
       await ensurePicked('to');
       const a = [picked.from.lng, picked.from.lat];
       const b = [picked.to.lng, picked.to.lat];
-      const url = 'https://router.project-osrm.org/route/v1/driving/'
-        + a[0] + ',' + a[1] + ';' + b[0] + ',' + b[1]
-        + '?overview=full&geometries=geojson&steps=true';
-      const res = await fetch(url);
-      const data = await res.json();
-      if (data.code !== 'Ok') throw new Error('No driving route found.');
-      const route = data.routes[0];
-
-      map.getSource('route').setData({ type: 'Feature', geometry: route.geometry });
-      const bounds = new maplibregl.LngLatBounds();
-      route.geometry.coordinates.forEach(c => bounds.extend(c));
+      destLngLat = b;
+      const route = await fetchRoute(a, b);
       panel.classList.remove('open');
-      map.fitBounds(bounds, { padding: { top: 80, bottom: 220, left: 40, right: 40 } });
-
-      const steps = route.legs[0].steps.map(s => '<li>' + stepText(s) + '</li>').join('');
-      info.innerHTML = '<b>' + fmtTime(route.duration) + ' (' + fmtDist(route.distance) + ')</b><ol>' + steps + '</ol>';
+      drawRoute(route, true);
+      renderInfo(route);
     } catch (err) {
       info.textContent = err.message || 'Route failed. Check your internet and try again.';
     }
+  });
+
+  // ---------- Live navigation ----------
+  const navbar = document.getElementById('navbar');
+  const navMain = document.getElementById('navMain');
+  const navSub = document.getElementById('navSub');
+  const navVoice = document.getElementById('navVoice');
+  let navWatch = null, navIdx = 0, userDot = null, lastReroute = 0, voiceOn = true, wakeLock = null;
+  const said = {};
+
+  function say(text) {
+    if (!voiceOn || !('speechSynthesis' in window)) return;
+    try {
+      speechSynthesis.cancel();
+      speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+    } catch (e) { /* voice is optional */ }
+  }
+
+  function meters(a, b) {
+    const R = 6371000, rad = Math.PI / 180;
+    const dLat = (b[1] - a[1]) * rad, dLng = (b[0] - a[0]) * rad;
+    const s = Math.sin(dLat / 2) ** 2 +
+      Math.cos(a[1] * rad) * Math.cos(b[1] * rad) * Math.sin(dLng / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(s));
+  }
+
+  // Shortest distance in metres from point p ([lng, lat]) to the route line.
+  function distToRoute(p, coords) {
+    const kx = 111320 * Math.cos(p[1] * Math.PI / 180), ky = 110540;
+    let best = Infinity;
+    for (let i = 0; i < coords.length - 1; i++) {
+      const ax = (coords[i][0] - p[0]) * kx, ay = (coords[i][1] - p[1]) * ky;
+      const bx = (coords[i + 1][0] - p[0]) * kx, by = (coords[i + 1][1] - p[1]) * ky;
+      const dx = bx - ax, dy = by - ay;
+      const len2 = dx * dx + dy * dy;
+      let t = len2 ? -(ax * dx + ay * dy) / len2 : 0;
+      t = Math.max(0, Math.min(1, t));
+      const d = Math.hypot(ax + t * dx, ay + t * dy);
+      if (d < best) best = d;
+    }
+    return best;
+  }
+
+  function startNav() {
+    if (!currentRoute) return;
+    if (!navigator.geolocation) { info.textContent = 'Location is not available on this device.'; return; }
+    if (navWatch !== null) return;
+    navIdx = 0;
+    Object.keys(said).forEach(k => delete said[k]);
+    document.body.classList.add('navigating');
+    navbar.style.display = 'block';
+    info.style.display = 'none';
+    navMain.textContent = 'Finding your location...';
+    navSub.textContent = 'Allow location access if your phone asks.';
+    say('Navigation started');
+    try {
+      if (navigator.wakeLock) navigator.wakeLock.request('screen').then(l => { wakeLock = l; }).catch(() => {});
+    } catch (e) { /* screen stays on only where supported */ }
+    navWatch = navigator.geolocation.watchPosition(onPos, onPosErr,
+      { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 });
+  }
+
+  function stopNav(msg) {
+    if (navWatch !== null) { navigator.geolocation.clearWatch(navWatch); navWatch = null; }
+    if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+    if (userDot) { userDot.remove(); userDot = null; }
+    document.body.classList.remove('navigating');
+    navbar.style.display = 'none';
+    info.style.display = 'block';
+    map.easeTo({ bearing: 0, pitch: 0 });
+    if (msg) toast.textContent = msg;
+    try { speechSynthesis.cancel(); } catch (e) { /* ignore */ }
+  }
+
+  function onPosErr(err) {
+    if (err.code === 1) {
+      stopNav('Location was blocked. Allow location for this site and tap Start again.');
+    } else {
+      navSub.textContent = 'Waiting for a GPS signal...';
+    }
+  }
+
+  async function reroute(me) {
+    lastReroute = Date.now();
+    navMain.textContent = 'Recalculating...';
+    say('Recalculating');
+    try {
+      const r = await fetchRoute(me, destLngLat);
+      drawRoute(r, false);
+      navIdx = 0;
+      Object.keys(said).forEach(k => delete said[k]);
+      renderInfo(r);
+      info.style.display = 'none';
+    } catch (e) {
+      navSub.textContent = 'Could not recalculate. Check your internet.';
+    }
+  }
+
+  function onPos(pos) {
+    if (!currentRoute) return;
+    const c = pos.coords;
+    const me = [c.longitude, c.latitude];
+    if (!userDot) {
+      const el = document.createElement('div');
+      el.className = 'me';
+      userDot = new maplibregl.Marker({ element: el }).setLngLat(me).addTo(map);
+    } else {
+      userDot.setLngLat(me);
+    }
+    const moving = c.heading != null && !isNaN(c.heading) && (c.speed || 0) > 1.5;
+    map.easeTo({ center: me, zoom: 17, bearing: moving ? c.heading : map.getBearing(), duration: 800 });
+
+    const steps = currentRoute.legs[0].steps;
+    for (let k = navIdx + 1; k < Math.min(steps.length, navIdx + 4); k++) {
+      if (meters(me, steps[k].maneuver.location) < 30) navIdx = k;
+    }
+    if (navIdx >= steps.length - 1) {
+      say('You have arrived');
+      stopNav('You have arrived.');
+      return;
+    }
+
+    const next = steps[navIdx + 1];
+    const d = meters(me, next.maneuver.location);
+    let remaining = d;
+    for (let k = navIdx + 1; k < steps.length; k++) remaining += steps[k].distance;
+    const secs = currentRoute.duration * (remaining / Math.max(currentRoute.distance, 1));
+    navMain.textContent = instr(next);
+    navSub.textContent = 'in ' + fmtDist(d) + '  ·  ' + fmtDist(remaining) + ' left  ·  ' + fmtTime(secs);
+
+    if (d < 350 && !said['a' + navIdx]) {
+      said['a' + navIdx] = 1;
+      say('In ' + Math.max(50, Math.round(d / 50) * 50) + ' metres, ' + instr(next));
+    }
+    if (d < 60 && !said['b' + navIdx]) {
+      said['b' + navIdx] = 1;
+      say(instr(next));
+    }
+
+    if (c.accuracy <= 60 && Date.now() - lastReroute > 15000 &&
+        distToRoute(me, currentRoute.geometry.coordinates) > 70) {
+      reroute(me);
+    }
+  }
+
+  document.getElementById('navStop').addEventListener('click', () => stopNav('Navigation stopped.'));
+  navVoice.addEventListener('click', () => {
+    voiceOn = !voiceOn;
+    navVoice.textContent = voiceOn ? '🔊 Voice on' : '🔇 Voice off';
+    if (!voiceOn) { try { speechSynthesis.cancel(); } catch (e) { /* ignore */ } }
   });
 </script>
 </body>
