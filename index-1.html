@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Malayan Map</title>
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<style>
+  html, body { margin: 0; height: 100%; font-family: -apple-system, system-ui, sans-serif; }
+  #map { position: absolute; inset: 0; }
+  #cross {
+    position: absolute; left: 50%; top: 50%; z-index: 4; pointer-events: none;
+    width: 28px; height: 28px; margin: -14px 0 0 -14px;
+    border: 3px solid #111; border-radius: 50%; background: rgba(255,255,255,.5);
+  }
+  #toggle {
+    position: absolute; top: 12px; left: 12px; z-index: 6;
+    padding: 10px 14px; font-size: 15px; border: 0; border-radius: 10px;
+    background: #111; color: #fff; box-shadow: 0 2px 10px rgba(0,0,0,.3);
+  }
+  #toast {
+    position: absolute; top: 12px; left: 110px; right: 12px; z-index: 5;
+    background: #fff; border-radius: 10px; padding: 10px 12px; font-size: 13px;
+    box-shadow: 0 2px 10px rgba(0,0,0,.2);
+  }
+  #panel {
+    position: absolute; top: 64px; left: 12px; right: 12px; z-index: 6;
+    display: none; flex-direction: column; gap: 6px;
+    max-height: calc(100% - 150px); overflow-y: auto;
+  }
+  #panel.open { display: flex; }
+  .field { display: flex; gap: 6px; }
+  .field input {
+    flex: 1; min-width: 0; padding: 12px 14px; font-size: 16px;
+    border: 1px solid #ccc; border-radius: 10px; background: #fff;
+  }
+  #loc {
+    padding: 0 14px; font-size: 18px; border: 1px solid #ccc;
+    border-radius: 10px; background: #fff;
+  }
+  .list {
+    list-style: none; margin: 0; padding: 0; background: #fff;
+    border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,.2);
+  }
+  .list:empty { display: none; }
+  .list li { padding: 10px 14px; font-size: 14px; border-bottom: 1px solid #eee; cursor: pointer; }
+  .list li:last-child { border-bottom: 0; }
+  .list li span { color: #666; font-size: 12px; }
+  .list li.none { color: #666; cursor: default; }
+  #go {
+    padding: 12px 16px; font-size: 16px; border: 0; border-radius: 10px;
+    background: #1a73e8; color: #fff;
+  }
+  #info {
+    position: absolute; left: 12px; right: 64px; bottom: 70px; z-index: 5;
+    background: #fff; border-radius: 12px; padding: 10px 14px; font-size: 14px;
+    max-height: 28%; overflow-y: auto; display: none;
+    box-shadow: 0 2px 10px rgba(0,0,0,.2);
+  }
+  #info b { font-size: 16px; }
+  #info ol { margin: 8px 0 0; padding-left: 20px; }
+  #info li { margin-bottom: 4px; }
+  #bar {
+    position: absolute; left: 12px; right: 12px; bottom: 12px; z-index: 5;
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
+  }
+  #bar button {
+    padding: 12px 4px; font-size: 14px; border: 0; border-radius: 12px;
+    background: #111; color: #fff; box-shadow: 0 2px 10px rgba(0,0,0,.3);
+  }
+  .rep { font-size: 28px; line-height: 1; cursor: pointer; }
+  .maplibregl-ctrl-bottom-right { bottom: 70px !important; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="cross"></div>
+<button id="toggle" type="button">🧭 Route</button>
+<div id="toast">Move the map so the circle is on the spot, then tap a report button.</div>
+<div id="panel">
+  <div class="field">
+    <input id="from" type="search" enterkeyhint="search" placeholder="From: type a place, press Search">
+    <button id="loc" type="button" title="Use my location">📍</button>
+  </div>
+  <ul id="fromList" class="list"></ul>
+  <div class="field">
+    <input id="to" type="search" enterkeyhint="search" placeholder="To: type a place, press Search">
+  </div>
+  <ul id="toList" class="list"></ul>
+  <button id="go" type="button">Get route</button>
+</div>
+<div id="info"></div>
+<div id="bar">
+  <button data-type="accident">🚗 Accident</button>
+  <button data-type="police">👮 Police</button>
+  <button data-type="jam">🚦 Jam</button>
+  <button data-type="hazard">⚠️ Hazard</button>
+</div>
+<script>
+  const SUPABASE_URL = 'https://kzokgbnerpibabcgrcbr.supabase.co';
+  const SUPABASE_KEY = 'sb_publishable_OZ9_DtSN1NVMqucwukgEmw_6yd1EvsE';
+  const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+  const ICONS = { accident: '🚗', police: '👮', jam: '🚦', hazard: '⚠️' };
+  const LABELS = { accident: 'Accident', police: 'Police', jam: 'Traffic jam', hazard: 'Hazard' };
+  const MAX_AGE_MS = 2 * 60 * 60 * 1000;
+  const toast = document.getElementById('toast');
+  const info = document.getElementById('info');
+  const panel = document.getElementById('panel');
+
+  const map = new maplibregl.Map({
+    container: 'map',
+    style: {
+      version: 8,
+      sources: {
+        osm: {
+          type: 'raster',
+          tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+          tileSize: 256,
+          attribution: '&copy; OpenStreetMap contributors'
+        }
+      },
+      layers: [{ id: 'osm', type: 'raster', source: 'osm' }]
+    },
+    center: [103.8198, 1.3521],
+    zoom: 12
+  });
+  map.addControl(new maplibregl.NavigationControl(), 'bottom-right');
+  map.addControl(new maplibregl.GeolocateControl({
+    positionOptions: { enableHighAccuracy: true },
+    trackUserLocation: true
+  }), 'bottom-right');
+
+  map.on('load', () => {
+    map.addSource('route', {
+      type: 'geojson',
+      data: { type: 'Feature', geometry: { type: 'LineString', coordinates: [] } }
+    });
+    map.addLayer({
+      id: 'route-line', type: 'line', source: 'route',
+      layout: { 'line-join': 'round', 'line-cap': 'round' },
+      paint: { 'line-color': '#1a73e8', 'line-width': 6 }
+    });
+  });
+
+  document.getElementById('toggle').addEventListener('click', () => {
+    panel.classList.toggle('open');
+  });
+
+  // ---------- Community reports ----------
+  const markers = {};
+
+  function ago(t) {
+    const m = Math.round((Date.now() - t) / 60000);
+    return m < 1 ? 'just now' : m + ' min ago';
+  }
+
+  function addMarker(r) {
+    const el = document.createElement('div');
+    el.className = 'rep';
+    el.textContent = ICONS[r.type] || '❓';
+    const box = document.createElement('div');
+    const title = document.createElement('b');
+    title.textContent = LABELS[r.type] || r.type;
+    const when = document.createElement('div');
+    when.textContent = ago(Date.parse(r.created_at));
+    box.append(title, when);
+    const popup = new maplibregl.Popup({ offset: 20 }).setDOMContent(box);
+    markers[r.id] = new maplibregl.Marker({ element: el })
+      .setLngLat([r.lng, r.lat]).setPopup(popup).addTo(map);
+  }
+
+  async function refresh() {
+    const since = new Date(Date.now() - MAX_AGE_MS).toISOString();
+    const { data, error } = await sb.from('reports').select('*').gte('created_at', since);
+    if (error) { toast.textContent = 'Could not load reports: ' + error.message; return; }
+    const seen = new Set();
+    data.forEach(r => { seen.add(r.id); if (!markers[r.id]) addMarker(r); });
+    Object.keys(markers).forEach(id => {
+      if (!seen.has(id)) { markers[id].remove(); delete markers[id]; }
+    });
+  }
+
+  document.getElementById('bar').addEventListener('click', async (e) => {
+    const type = e.target.dataset.type;
+    if (!type) return;
+    const c = map.getCenter();
+    toast.textContent = 'Sending report...';
+    const { error } = await sb.from('reports').insert({ type, lat: c.lat, lng: c.lng });
+    if (error) { toast.textContent = 'Report failed: ' + error.message; return; }
+    toast.textContent = LABELS[type] + ' reported. Everyone can see it now.';
+    refresh();
+  });
+
+  refresh();
+  setInterval(refresh, 20000);
+
+  // ---------- Place search ----------
+  const inputs = { from: document.getElementById('from'), to: document.getElementById('to') };
+  const lists = { from: document.getElementById('fromList'), to: document.getElementById('toList') };
+  const picked = { from: null, to: null };
+  const pins = {};
+
+  function setPin(key, lngLat) {
+    if (pins[key]) pins[key].remove();
+    pins[key] = new maplibregl.Marker({ color: key === 'from' ? '#2e7d32' : '#c62828' })
+      .setLngLat(lngLat).addTo(map);
+  }
+
+  async function geocode(q, limit) {
+    const b = map.getBounds();
+    const viewbox = [b.getWest(), b.getNorth(), b.getEast(), b.getSouth()].join(',');
+    const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=' + limit
+      + '&countrycodes=sg,my&viewbox=' + viewbox + '&q=' + encodeURIComponent(q);
+    const res = await fetch(url);
+    return res.json();
+  }
+
+  function toPlace(r) {
+    const parts = r.display_name.split(',').map(s => s.trim());
+    return { lng: parseFloat(r.lon), lat: parseFloat(r.lat), label: r.name || parts[0], rest: parts.slice(1, 4).join(', ') };
+  }
+
+  function pick(key, p) {
+    picked[key] = p;
+    inputs[key].value = p.label;
+    lists[key].innerHTML = '';
+    setPin(key, [p.lng, p.lat]);
+    map.flyTo({ center: [p.lng, p.lat], zoom: 14 });
+  }
+
+  function showNote(key, text) {
+    const li = document.createElement('li');
+    li.className = 'none';
+    li.textContent = text;
+    lists[key].innerHTML = '';
+    lists[key].appendChild(li);
+  }
+
+  async function runSearch(key) {
+    const q = inputs[key].value.trim();
+    if (!q) return;
+    showNote(key, 'Searching...');
+    try {
+      const results = await geocode(q, 6);
+      if (!results.length) { showNote(key, 'No results. Try another name.'); return; }
+      lists[key].innerHTML = '';
+      results.map(toPlace).forEach(p => {
+        const li = document.createElement('li');
+        const name = document.createElement('b');
+        name.textContent = p.label;
+        const rest = document.createElement('span');
+        rest.textContent = p.rest;
+        li.append(name, document.createElement('br'), rest);
+        li.addEventListener('click', () => pick(key, p));
+        lists[key].appendChild(li);
+      });
+    } catch (err) {
+      showNote(key, 'Search failed. Check your internet.');
+    }
+  }
+
+  ['from', 'to'].forEach(key => {
+    inputs[key].addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); runSearch(key); }
+    });
+    inputs[key].addEventListener('input', () => { picked[key] = null; });
+  });
+
+  document.getElementById('loc').addEventListener('click', () => {
+    if (!navigator.geolocation) { showNote('from', 'Location is not available.'); return; }
+    showNote('from', 'Finding your location...');
+    navigator.geolocation.getCurrentPosition(
+      pos => pick('from', { lng: pos.coords.longitude, lat: pos.coords.latitude, label: 'My location' }),
+      () => showNote('from', 'Could not get your location. Allow location access and try again.'),
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  });
+
+  // ---------- Routing ----------
+  function fmtDist(m) { return m >= 1000 ? (m / 1000).toFixed(1) + ' km' : Math.round(m) + ' m'; }
+  function fmtTime(s) {
+    const mins = Math.round(s / 60);
+    return mins < 60 ? mins + ' min' : Math.floor(mins / 60) + ' h ' + (mins % 60) + ' min';
+  }
+  function stepText(st) {
+    const m = st.maneuver;
+    const road = st.name ? ' onto ' + st.name : '';
+    let verb;
+    if (m.type === 'depart') verb = 'Head ' + (m.modifier || 'forward');
+    else if (m.type === 'arrive') return 'Arrive at destination';
+    else if (m.type === 'roundabout' || m.type === 'rotary') verb = 'Take the roundabout';
+    else if (m.modifier === 'straight') verb = 'Continue straight';
+    else verb = 'Turn ' + (m.modifier || 'ahead');
+    return verb + road + ' (' + fmtDist(st.distance) + ')';
+  }
+
+  async function ensurePicked(key) {
+    if (picked[key]) return;
+    const q = inputs[key].value.trim();
+    if (!q) throw new Error('Enter both a start and a destination.');
+    const results = await geocode(q, 1);
+    if (!results.length) throw new Error('Place not found: ' + q);
+    pick(key, toPlace(results[0]));
+  }
+
+  document.getElementById('go').addEventListener('click', async () => {
+    info.style.display = 'block';
+    info.textContent = 'Finding route...';
+    try {
+      await ensurePicked('from');
+      await ensurePicked('to');
+      const a = [picked.from.lng, picked.from.lat];
+      const b = [picked.to.lng, picked.to.lat];
+      const url = 'https://router.project-osrm.org/route/v1/driving/'
+        + a[0] + ',' + a[1] + ';' + b[0] + ',' + b[1]
+        + '?overview=full&geometries=geojson&steps=true';
+      const res = await fetch(url);
+      const data = await res.json();
+      if (data.code !== 'Ok') throw new Error('No driving route found.');
+      const route = data.routes[0];
+
+      map.getSource('route').setData({ type: 'Feature', geometry: route.geometry });
+      const bounds = new maplibregl.LngLatBounds();
+      route.geometry.coordinates.forEach(c => bounds.extend(c));
+      panel.classList.remove('open');
+      map.fitBounds(bounds, { padding: { top: 80, bottom: 220, left: 40, right: 40 } });
+
+      const steps = route.legs[0].steps.map(s => '<li>' + stepText(s) + '</li>').join('');
+      info.innerHTML = '<b>' + fmtTime(route.duration) + ' (' + fmtDist(route.distance) + ')</b><ol>' + steps + '</ol>';
+    } catch (err) {
+      info.textContent = err.message || 'Route failed. Check your internet and try again.';
+    }
+  });
+</script>
+</body>
+</html>
